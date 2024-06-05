@@ -5,12 +5,9 @@
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use reqwest::Client;
-use alloy_transport_http::Http;
-use alloy_rpc_client::RpcClient;
-
 use reth_transaction_pool::TransactionPool;
 use reth_provider::Chain;
+use reth_revm::InMemoryDB;
 use reth_node_ethereum::EthereumNode;
 use reth_node_api::FullNodeComponents;
 use reth_exex::{ExExContext, ExExEvent};
@@ -22,6 +19,8 @@ use kona_derive::DerivationPipeline;
 use kona_derive::sources::EthereumDataSource;
 use kona_derive::stages::{L1Traversal, StatefulAttributesBuilder, L1Retrieval, FrameQueue, ChannelBank, ChannelReader, BatchQueue, AttributesQueue};
 use kona_primitives::{BlockInfo, L2BlockInfo, RollupConfig, SystemConfig};
+
+mod execution;
 
 mod blobs;
 use blobs::{ExExBlobProvider, InMemoryBlobProvider};
@@ -58,17 +57,9 @@ fn main() -> eyre::Result<()> {
     })
 }
 
-/// Creates a new HTTP provider using the `OP_RPC_URL` environment variable.
-/// The `OP_RPC_URL` must use the engine api port - 8551 by default.
-pub fn new_http_provider() -> RpcClient<Http<Client>> {
-    let url = std::env::var("OP_RPC_URL").expect("OP_RPC_URL must be set");
-    let url = url.parse().unwrap();
-    let http = Http::<Client>::new(url);
-    RpcClient::new(http, true)
-}
-
 struct Deriver<Node: FullNodeComponents> {
     ctx: ExExContext<Node>,
+    db: InMemoryDB,
     chain_provider: Arc<Mutex<InMemoryChainProvider>>,
     tip_state: Arc<Mutex<TipState>>,
     l2_chain_provider: Arc<Mutex<InMemoryL2ChainProvider>>,
@@ -79,6 +70,7 @@ impl<Node: FullNodeComponents> Deriver<Node> {
     fn new(ctx: ExExContext<Node>) -> Self {
         Self {
             ctx,
+            db: InMemoryDB::new(reth_revm::db::EmptyDB::default()),
             chain_provider: Arc::new(Mutex::new(InMemoryChainProvider::new())),
             tip_state: Arc::new(Mutex::new(TipState::new(BlockInfo::default(), SystemConfig::default()))),
             l2_chain_provider: Arc::new(Mutex::new(InMemoryL2ChainProvider::new())),
@@ -118,29 +110,24 @@ impl<Node: FullNodeComponents> Deriver<Node> {
             }
         });
 
-        // TODO: we need to add an authorization header with the JWT secret.
-        // Instantiate a new client over a transport.
-        // let client: RpcClient = new_http_provider();
+        // TODO: get rollup config from superchain-registry + configured chain id
+        //       get genesis from rollup config
+        //       derive ChainSpec from genesis
+        let chain_spec = Arc::new(reth_primitives::ChainSpec::default());
 
         // Process all new chain state notifications
         loop {
             tokio::select! {
                 Some(attributes) = receiver.recv() => {
-                    info!("Received payload attributes with parent: {}", attributes.parent.block_info.number);
-                    // let expected = attributes.parent.block_info.number + 1;
-
-                    // Prepare a request to the server.
-                    // let request = client.request("engine_getPayloadV2", (attributes.parent.block_info.number));
-
-                    // Poll the request to completion.
-                    // let fetched = request.await.unwrap();
-
-                    // TODO: parse into payload attributes
-
-                    // if fetched. != attributes.parent.block_info.hash {
-                    //     error!("Parent block hash mismatch: expected {}, got {}", expected, attributes.parent.block_info.hash);
-                    //     continue;
-                    // }
+                    let block_hash = execution::exec_payload(
+                        &mut self.db,
+                        attributes,
+                        self.ctx.pool().clone(),
+                        self.ctx.evm_config().clone(),
+                        Arc::clone(&chain_spec),
+                    ).await?;
+                    info!("Executed block with hash: {}", block_hash);
+                    // TODO: fetch block from sequencer and verify block hash matches
                 }
                 Some(notification) = self.ctx.notifications.recv() => {
                     if let Some(reverted_chain) = notification.reverted_chain() {
