@@ -8,20 +8,22 @@ use std::sync::Mutex;
 use reqwest::Client;
 use alloy_transport_http::Http;
 use alloy_rpc_client::RpcClient;
+use alloy_rpc_types::{BlockTransactions, BlockNumberOrTag};
+use alloy_provider::{Provider, ReqwestProvider};
 
 use reth_transaction_pool::TransactionPool;
 use reth_provider::Chain;
 use reth_node_ethereum::EthereumNode;
 use reth_node_api::FullNodeComponents;
 use reth_exex::{ExExContext, ExExEvent};
-use reth_tracing::tracing::{error, info};
+use reth_tracing::tracing::{error, debug, info};
 use reth_primitives::{Receipt, TxHash, B256, BlobTransactionSidecar, SealedBlockWithSenders};
 
 use kona_derive::types::Blob;
 use kona_derive::DerivationPipeline;
 use kona_derive::sources::EthereumDataSource;
 use kona_derive::stages::{L1Traversal, StatefulAttributesBuilder, L1Retrieval, FrameQueue, ChannelBank, ChannelReader, BatchQueue, AttributesQueue};
-use kona_primitives::{BlockInfo, L2BlockInfo, RollupConfig, SystemConfig};
+use kona_primitives::{BlockInfo, RawTransaction, Withdrawal, L2BlockInfo, RollupConfig, SystemConfig, L2PayloadAttributes};
 
 mod blobs;
 use blobs::{ExExBlobProvider, InMemoryBlobProvider};
@@ -59,12 +61,11 @@ fn main() -> eyre::Result<()> {
 }
 
 /// Creates a new HTTP provider using the `OP_RPC_URL` environment variable.
-/// The `OP_RPC_URL` must use the engine api port - 8551 by default.
-pub fn new_http_provider() -> RpcClient<Http<Client>> {
+pub fn new_http_provider() -> ReqwestProvider {
     let url = std::env::var("OP_RPC_URL").expect("OP_RPC_URL must be set");
     let url = url.parse().unwrap();
     let http = Http::<Client>::new(url);
-    RpcClient::new(http, true)
+    ReqwestProvider::new(RpcClient::new(http, true))
 }
 
 struct Deriver<Node: FullNodeComponents> {
@@ -118,29 +119,62 @@ impl<Node: FullNodeComponents> Deriver<Node> {
             }
         });
 
-        // TODO: we need to add an authorization header with the JWT secret.
-        // Instantiate a new client over a transport.
-        // let client: RpcClient = new_http_provider();
+        // Create a new ReqwestProvider using the `OP_RPC_URL` env var.
+        let provider: ReqwestProvider = new_http_provider();
 
         // Process all new chain state notifications
         loop {
             tokio::select! {
                 Some(attributes) = receiver.recv() => {
                     info!("Received payload attributes with parent: {}", attributes.parent.block_info.number);
-                    // let expected = attributes.parent.block_info.number + 1;
 
-                    // Prepare a request to the server.
-                    // let request = client.request("engine_getPayloadV2", (attributes.parent.block_info.number));
+                    let expected = attributes.parent.block_info.number + 1;
+                    debug!("Fetching block {} to compare attributes", expected);
+                    let tag: BlockNumberOrTag = expected.into();
+                    let block = match provider.get_block_by_number(tag, true).await {
+                        Ok(Some(block)) => block,
+                        Ok(None) => {
+                            error!("Block {expected} not found for attributes");
+                            continue;
+                        }
+                        Err(e) => {
+                            error!("Failed to fetch block {}: {:?}", expected, e);
+                            continue;
+                        }
+                    };
 
-                    // Poll the request to completion.
-                    // let fetched = request.await.unwrap();
+                    let derived_payload = attributes.attributes;
+                    let full_transactions = match block.transactions {
+                        BlockTransactions::Full(txns) => txns,
+                        _ => {
+                            error!("Block {expected} missing full transactions");
+                            continue;
+                        }
+                    };
+                    let transactions: eyre::Result<Vec<RawTransaction>> = full_transactions.iter().map(|tx| {
+                        serde_json::to_vec(&tx).map_err(|e| eyre::eyre!("Failed to serialize transaction: {:?}", e)).map(RawTransaction::from)
+                    }).collect();
+                    let fetched_payload = L2PayloadAttributes {
+                        timestamp: block.header.timestamp,
+                        prev_randao: block.header.mix_hash.unwrap_or_default(),
+                        fee_recipient: block.header.miner,
+                        withdrawals: block.withdrawals.map(|ws| ws.iter().map(|w| Withdrawal {
+                            index: w.index,
+                            validator_index: w.validator_index,
+                            address: w.address,
+                            amount: w.amount,
+                        }).collect()),
+                        parent_beacon_block_root: Some(block.header.parent_hash),
+                        transactions: transactions?,
+                        no_tx_pool: false,
+                        gas_limit: Some(block.header.gas_limit as u64),
+                    };
 
-                    // TODO: parse into payload attributes
-
-                    // if fetched. != attributes.parent.block_info.hash {
-                    //     error!("Parent block hash mismatch: expected {}, got {}", expected, attributes.parent.block_info.hash);
-                    //     continue;
-                    // }
+                    if derived_payload != fetched_payload {
+                        error!("Parent block hash mismatch: expected {}, got {}", expected, attributes.parent.block_info.hash);
+                        continue;
+                    }
+                    info!("Attributes derived successfully for block {}", expected);
                 }
                 Some(notification) = self.ctx.notifications.recv() => {
                     if let Some(reverted_chain) = notification.reverted_chain() {

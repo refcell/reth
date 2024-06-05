@@ -4829,6 +4829,7 @@ dependencies = [
  "alloy-provider 0.1.0 (git+https://github.com/alloy-rs/alloy?rev=bd39117)",
  "alloy-rlp",
  "alloy-rpc-client 0.1.0 (git+https://github.com/alloy-rs/alloy?rev=bd39117)",
+ "alloy-rpc-types 0.1.0 (git+https://github.com/alloy-rs/alloy?rev=bd39117)",
  "alloy-transport-http 0.1.0 (git+https://github.com/alloy-rs/alloy?rev=bd39117)",
  "anyhow",
  "async-trait",
