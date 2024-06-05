@@ -126,8 +126,8 @@ impl<Node: FullNodeComponents> Deriver<Node> {
                         self.ctx.evm_config().clone(),
                         Arc::clone(&chain_spec),
                     ).await?;
-                    info!("Executed block with hash: {}", block_hash);
                     // TODO: fetch block from sequencer and verify block hash matches
+                    info!("Executed block with hash: {}", block_hash);
                 }
                 Some(notification) = self.ctx.notifications.recv() => {
                     if let Some(reverted_chain) = notification.reverted_chain() {
