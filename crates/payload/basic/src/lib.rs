@@ -945,11 +945,17 @@ pub fn is_better_payload<T: BuiltPayload>(best_payload: Option<&T>, new_fees: U2
     }
 }
 
-/// Returns the duration until the given unix timestamp in seconds.
+const UNIX_MILLISECOND_TIMESTAMP_THRESHOLD: u64 = 100_000_000_000;
+
+/// Returns the duration until the given unix timestamp.
 ///
 /// Returns `Duration::ZERO` if the given timestamp is in the past.
-fn duration_until(unix_timestamp_secs: u64) -> Duration {
+fn duration_until(unix_timestamp: u64) -> Duration {
     let unix_now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
-    let timestamp = Duration::from_secs(unix_timestamp_secs);
+    let timestamp = if unix_timestamp >= UNIX_MILLISECOND_TIMESTAMP_THRESHOLD {
+        Duration::from_millis(unix_timestamp)
+    } else {
+        Duration::from_secs(unix_timestamp)
+    };
     timestamp.saturating_sub(unix_now)
 }
